@@ -1,3 +1,0 @@
-method,collision_rate,avg_safety_violations,avg_unsafe_lane_change_attempts,lane_change_rate,avg_min_distance_front,mean_speed,avg_total_reward
-Baseline,1.0,47.52,0.0,1.0,1.7362754960063194,23.660085349894157,70.13820000000374
-Safety-filtered,0.02,43.6,0.0,1.0,5.148284463568356,15.960217404921728,-16.477399999999157

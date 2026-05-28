@@ -33,6 +33,7 @@ def run_episode(use_safety_filter=True, scenario="safe_overtake", seed=0):
         next_state, reward, done, info = env.step(
             a_ego=a_ego,
             lane_change_command=lane_cmd,
+            enforce_lane_safety=use_safety_filter,
         )
 
         info["a_nom"] = a_nom

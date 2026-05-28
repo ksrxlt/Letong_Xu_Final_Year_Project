@@ -53,13 +53,13 @@ class MultiLaneCarFollowingEnv:
 
         elif self.scenario == "blocked_by_front":
             # Side vehicle is ahead but too close, lane change should be blocked
-            self.x_side = 18.0
+            self.x_side = 8.0
             self.v_side = 16.0
 
         elif self.scenario == "blocked_by_rear":
             # Side vehicle is behind but too close, lane change should be blocked
-            self.x_side = -8.0
-            self.v_side = 24.0
+            self.x_side = -6.0
+            self.v_side = 20.0
 
         else:
             raise ValueError(f"Unknown scenario: {self.scenario}")
@@ -160,7 +160,7 @@ class MultiLaneCarFollowingEnv:
     def safe_distance(self):
         return 5.0 + 0.5 * self.v_ego
 
-    def step(self, a_ego, lane_change_command=0):
+    def step(self, a_ego, lane_change_command=0, enforce_lane_safety=True):
         """
         Args:
             a_ego: ego longitudinal acceleration
@@ -176,11 +176,20 @@ class MultiLaneCarFollowingEnv:
         unsafe_lane_change_attempt = False
 
         if lane_change_command == 1:
-            if self.is_target_lane_safe():
-                self.lane_ego = 1 - self.lane_ego
-                lane_change_executed = True
-            else:
+            target_lane_safe = self.is_target_lane_safe()
+
+            if not target_lane_safe:
                 unsafe_lane_change_attempt = True
+
+            if enforce_lane_safety:
+                # Safety-filtered mode: only change lane if target lane is safe
+                if target_lane_safe:
+                    self.lane_ego = 1 - self.lane_ego
+                    lane_change_executed = True
+                else:
+                    # Baseline mode: execute lane change even if it is unsafe
+                    self.lane_ego = 1 - self.lane_ego
+                    lane_change_executed = True
 
         # Human-driven vehicles update
         a_slow = self.human_vehicle_acceleration()

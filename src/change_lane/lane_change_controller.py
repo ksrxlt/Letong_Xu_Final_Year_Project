@@ -21,11 +21,11 @@ def rule_based_acceleration_controller(state):
 
 def lane_change_decision(state):
     """
-    Rule-based lane-change decision.
+    Nominal rule-based lane-change decision.
 
-    Returns:
-        0: keep current lane
-        1: request lane change
+    This controller only decides whether the ego vehicle wants to change lane.
+    It does not check whether the target lane is safe.
+    Safety is handled separately by the lane-change safety filter.
     """
 
     v_ego, lane_ego, distance_front, relative_velocity_front, front_gap_target, rear_gap_target = state
@@ -37,10 +37,7 @@ def lane_change_decision(state):
     front_vehicle_close = distance_front < 25.0
     front_vehicle_slower = relative_velocity_front < -2.0
 
-    target_lane_front_safe = front_gap_target > 15.0
-    target_lane_rear_safe = rear_gap_target > 10.0
-
-    if front_vehicle_close and front_vehicle_slower and target_lane_front_safe and target_lane_rear_safe:
+    if front_vehicle_close and front_vehicle_slower:
         return 1
 
     return 0
