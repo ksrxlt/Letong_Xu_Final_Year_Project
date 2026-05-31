@@ -1,22 +1,37 @@
 import numpy as np
 
 
+def compute_hard_barrier_distance(v_ego, v_front):
+    """
+    Short-horizon hard safety barrier.
+
+    This is intentionally less conservative than a full stopping-distance
+    barrier. It represents the minimum short-term recoverable distance.
+
+    Used only by CBF.
+    """
+
+    min_gap = 3.0
+    closing_speed = max(0.0, v_ego - v_front)
+
+    hard_distance = (
+        min_gap
+        + 0.2 * v_ego
+        + 0.4 * closing_speed
+    )
+
+    return hard_distance
+
+
 def cbf_three_vehicle_filter(a_nom, state, dt=0.1):
     """
-    One-step predictive CBF-inspired safety filter.
-
-    Current cut-in state:
-        [
-            v_ego,
-            v_front_effective,
-            distance_front,
-            relative_velocity_front,
-            cut_in_happened,
-            remaining_distance
-        ]
+    CBF-inspired one-step safety filter using the hard barrier.
 
     PPO outputs a_nom.
-    CBF checks whether a_nom would violate the next-step safety distance.
+    CBF only modifies a_nom if the predicted next-step distance violates
+    the hard safety barrier.
+
+    Soft barrier is handled by reward, not by CBF.
     """
 
     (
@@ -34,7 +49,8 @@ def cbf_three_vehicle_filter(a_nom, state, dt=0.1):
 
     a_nom = float(np.clip(a_nom, a_min, a_max))
 
-    candidate_actions = np.linspace(a_min, a_max, 61)
+    candidate_actions = np.linspace(a_min, a_max, 81)
+
     safe_actions = []
 
     for a in candidate_actions:
@@ -44,10 +60,13 @@ def cbf_three_vehicle_filter(a_nom, state, dt=0.1):
         v_front_next = v_front
 
         distance_next = distance_front + (v_front_next - v_ego_next) * dt
-        safe_distance_next = 5.0 + 0.5 * v_ego_next
 
-        # Add a small buffer so CBF is not too weak
-        if distance_next >= safe_distance_next + 1.0:
+        hard_distance_next = compute_hard_barrier_distance(
+            v_ego_next,
+            v_front_next,
+        )
+
+        if distance_next >= hard_distance_next + 0.5:
             safe_actions.append(a)
 
     if len(safe_actions) == 0:
@@ -55,7 +74,6 @@ def cbf_three_vehicle_filter(a_nom, state, dt=0.1):
 
     safe_actions = np.array(safe_actions)
 
-    # Choose the safe action closest to PPO nominal action
     best_action = safe_actions[np.argmin((safe_actions - a_nom) ** 2)]
 
     return float(np.clip(best_action, a_min, a_max))

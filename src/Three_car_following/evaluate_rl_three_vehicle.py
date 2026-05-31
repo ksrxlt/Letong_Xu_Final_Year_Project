@@ -6,15 +6,61 @@ from env_three_vehicle import ThreeVehicleFollowingEnv
 from controllers_three_vehicle import cbf_three_vehicle_filter
 
 
+def normalize_state(state, target_distance=4000.0):
+    """
+    PPO was trained on normalized observations.
+    Evaluation must use the same normalized observation.
+    """
+
+    speed_limit = 130.0 / 3.6
+
+    v_ego = state[0]
+    v_front = state[1]
+    distance_front = state[2]
+    relative_velocity = state[3]
+    cut_in_happened = state[4]
+    remaining_distance = state[5]
+
+    closing_speed = v_ego - v_front
+
+    soft_distance = 5.0 + 0.6 * v_ego + 1.0 * max(0.0, closing_speed)
+    desired_distance = soft_distance + 3.0
+    gap_error = distance_front - desired_distance
+
+    return np.array(
+        [
+            v_ego / speed_limit,
+            v_front / speed_limit,
+
+            np.clip(distance_front / 500.0, 0.0, 5.0),
+
+            relative_velocity / speed_limit,
+            closing_speed / speed_limit,
+
+            np.clip(gap_error / 200.0, -5.0, 5.0),
+
+            cut_in_happened,
+            remaining_distance / target_distance,
+
+            1.0 if gap_error > 30.0 else 0.0,
+        ],
+        dtype=np.float32,
+    )
+
+
 def map_action_to_acceleration(action):
+    """
+    action = 0 means acceleration = 0.
+    """
+
     action_value = float(np.clip(action[0], -1.0, 1.0))
 
-    a_min = -4.0
-    a_max = 2.0
+    if action_value >= 0.0:
+        acceleration = 2.0 * action_value
+    else:
+        acceleration = 4.0 * action_value
 
-    acceleration = a_min + (action_value + 1.0) * 0.5 * (a_max - a_min)
-
-    return float(np.clip(acceleration, a_min, a_max))
+    return float(np.clip(acceleration, -4.0, 2.0))
 
 
 def run_rl_episode(
@@ -35,9 +81,11 @@ def run_rl_episode(
     done = False
 
     while not done:
-        action, _ = model.predict(state, deterministic=True)
+        obs = normalize_state(state, target_distance=target_distance)
 
-        # This is now PPO output, not rule-based output
+        action, _ = model.predict(obs, deterministic=True)
+
+        # PPO output
         a_nom = map_action_to_acceleration(action)
 
         if use_cbf:
@@ -61,32 +109,15 @@ def run_rl_episode(
 
 
 def summarize_episode(df):
-    if "safety_violation" in df.columns:
-        safety_violations = df["safety_violation"].sum()
-    elif "front_too_close" in df.columns:
-        safety_violations = df["front_too_close"].sum()
-    else:
-        safety_violations = 0
-
-    if "cut_in_happened" in df.columns:
-        cut_in_happened = df["cut_in_happened"].any()
-    else:
-        cut_in_happened = False
-
-    if "cut_in_left_this_step" in df.columns:
-        cut_out_happened = df["cut_in_left_this_step"].any()
-    else:
-        cut_out_happened = False
-
     correction = (df["a_ego"] - df["a_nom"]).abs()
 
     return {
         "reached_target": df["reached_target"].any(),
         "travel_time": df["time"].iloc[-1],
         "collision": df["collision"].any(),
-        "safety_violations": safety_violations,
-        "cut_in_happened": cut_in_happened,
-        "cut_out_happened": cut_out_happened,
+        "safety_violations": df["safety_violation"].sum(),
+        "cut_in_happened": df["cut_in_happened"].any(),
+        "cut_out_happened": df["cut_in_left_this_step"].any(),
         "min_front_distance": df["distance_front"].min(),
         "mean_front_distance": df["distance_front"].mean(),
         "mean_speed": df["v_ego"].mean(),
@@ -130,7 +161,6 @@ def evaluate_method(
 def main():
     model = PPO.load("ppo_three_vehicle_cut_in")
 
-    # Single example trajectory for plotting
     ppo_df = run_rl_episode(
         model,
         use_cbf=False,
@@ -147,7 +177,7 @@ def main():
         target_distance=4000.0,
     )
 
-    # Keep these names so plot_three_vehicle.py can directly use them
+    # Keep these names so plot_three_vehicle.py can directly read them.
     ppo_df.to_csv("three_vehicle_baseline.csv", index=False)
     ppo_cbf_df.to_csv("three_vehicle_cbf.csv", index=False)
 
@@ -157,7 +187,6 @@ def main():
     print("\nPPO + CBF:")
     print(summarize_episode(ppo_cbf_df))
 
-    # Multi-seed evaluation
     for scenario in ["normal", "hard"]:
         ppo_results = evaluate_method(
             model,
@@ -211,7 +240,7 @@ def main():
         print(f"\nScenario: {scenario}")
         print(summary_table)
 
-    print("\nSaved RL evaluation results.")
+    print("\nSaved PPO and PPO+CBF evaluation results.")
 
 
 if __name__ == "__main__":

@@ -22,10 +22,10 @@ def main():
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,
+        ent_coef=0.005,
     )
 
-    model.learn(total_timesteps=100_000)
+    model.learn(total_timesteps=300_000)
 
     model.save("ppo_three_vehicle_cut_in")
 

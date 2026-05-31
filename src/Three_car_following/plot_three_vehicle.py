@@ -3,90 +3,59 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-BASELINE_FILE = "three_vehicle_baseline.csv"
-CBF_FILE = "three_vehicle_cbf.csv"
+BASELINE_FILE = "three_vehicle_baseline.csv"   # PPO without CBF
+CBF_FILE = "three_vehicle_cbf.csv"             # PPO + CBF
 
 
-# =========================
-# Basic helpers
-# =========================
+# ============================================================
+# Basic utilities
+# ============================================================
+
 def load_df(filename):
     return pd.read_csv(filename)
 
 
-def first_existing_column(df, candidates):
-    """
-    Return the first column name that exists in df from candidates.
-    """
-    for c in candidates:
-        if c in df.columns:
-            return c
-    raise KeyError(f"None of these columns were found: {candidates}")
-
-
-def get_front_distance_col(df):
-    return first_existing_column(df, ["distance_front", "effective_front_distance"])
-
-
-def get_safe_distance_col(df):
-    return first_existing_column(df, ["safe_distance", "safe_front_distance"])
-
-
-def get_nominal_acc_col(df):
-    return first_existing_column(df, ["a_nom", "nominal_acceleration"])
-
-
-def get_actual_acc_col(df):
-    return first_existing_column(df, ["a_ego", "filtered_acceleration", "actual_acceleration"])
-
-
-def get_front_speed_col(df):
-    return first_existing_column(df, ["v_front", "v_vehicle1", "vehicle1_speed"])
-
-
-def get_cut_in_speed_col(df):
-    return first_existing_column(df, ["v_cut_in", "v_vehicle2", "vehicle2_speed"])
-
-
-def get_time_col(df):
-    return first_existing_column(df, ["time"])
-
-
-def get_cut_in_enter_col(df):
-    return first_existing_column(df, ["cut_in_this_step", "cut_in_enter_this_step", "cut_in_entered"])
-
-
-def get_cut_in_leave_col(df):
-    return first_existing_column(df, ["cut_in_left_this_step", "cut_in_leave_this_step", "cut_in_left"])
-
-
-# =========================
-# Event helpers
-# =========================
 def get_event_times(df):
-    """
-    Return cut-in enter time and leave time if they exist.
-    """
-    time_col = get_time_col(df)
-
     cut_in_time = None
     cut_out_time = None
 
-    try:
-        enter_col = get_cut_in_enter_col(df)
-        if df[enter_col].astype(bool).any():
-            cut_in_time = df.loc[df[enter_col].astype(bool), time_col].iloc[0]
-    except KeyError:
-        pass
+    if "cut_in_this_step" in df.columns and df["cut_in_this_step"].astype(bool).any():
+        cut_in_time = df.loc[df["cut_in_this_step"].astype(bool), "time"].iloc[0]
 
-    try:
-        leave_col = get_cut_in_leave_col(df)
-        if df[leave_col].astype(bool).any():
-            cut_out_time = df.loc[df[leave_col].astype(bool), time_col].iloc[0]
-    except KeyError:
-        pass
+    if "cut_in_left_this_step" in df.columns and df["cut_in_left_this_step"].astype(bool).any():
+        cut_out_time = df.loc[df["cut_in_left_this_step"].astype(bool), "time"].iloc[0]
 
     return cut_in_time, cut_out_time
+
+
+def get_time_window(df, center_time, before=10.0, after=20.0):
+    if center_time is None:
+        return None
+
+    start_time = max(df["time"].min(), center_time - before)
+    end_time = min(df["time"].max(), center_time + after)
+
+    return df[
+        (df["time"] >= start_time)
+        & (df["time"] <= end_time)
+    ].copy()
+
+
+def get_time_window_from_other_df(df, start_time, end_time):
+    return df[
+        (df["time"] >= start_time)
+        & (df["time"] <= end_time)
+    ].copy()
+
+
+def add_single_event_line(event_time, label, linestyle):
+    if event_time is not None:
+        plt.axvline(
+            event_time,
+            linestyle=linestyle,
+            linewidth=2,
+            label=label,
+        )
 
 
 def add_event_lines(df):
@@ -109,143 +78,117 @@ def add_event_lines(df):
         )
 
 
-# =========================
-# Speed display logic
-# =========================
-def get_vehicle_speed_display_series(df):
-    """
-    Vehicle 1:
-        show before cut-in
-        hide during cut-in
-        show again after cut-out
+# ============================================================
+# Vehicle speed display
+# ============================================================
 
+def get_vehicle2_display_series(df):
+    """
     Vehicle 2:
         hide before cut-in
         show during cut-in
         hide after cut-out
     """
-    time_col = get_time_col(df)
-    v1_col = get_front_speed_col(df)
-    v2_col = get_cut_in_speed_col(df)
-
-    t = df[time_col]
-    v1 = df[v1_col]
-    v2 = df[v2_col]
-
     cut_in_time, cut_out_time = get_event_times(df)
 
-    v1_display = pd.Series(np.nan, index=df.index)
+    time = df["time"]
+    v2 = df["v_cut_in"]
+
     v2_display = pd.Series(np.nan, index=df.index)
 
     if cut_in_time is None:
-        # If no cut-in event recorded, only show vehicle 1
-        v1_display[:] = v1
-        return v1_display, v2_display
+        return v2_display
 
-    # Before cut-in -> show vehicle 1
-    before_mask = t < cut_in_time
-    v1_display[before_mask] = v1[before_mask]
-
-    # During cut-in -> show vehicle 2
     if cut_out_time is None:
-        during_mask = t >= cut_in_time
+        during_mask = time >= cut_in_time
     else:
-        during_mask = (t >= cut_in_time) & (t < cut_out_time)
+        during_mask = (time >= cut_in_time) & (time < cut_out_time)
 
     v2_display[during_mask] = v2[during_mask]
 
-    # After cut-out -> show vehicle 1 again
-    if cut_out_time is not None:
-        after_mask = t >= cut_out_time
-        v1_display[after_mask] = v1[after_mask]
-
-    return v1_display, v2_display
+    return v2_display
 
 
-# =========================
-# Plot 1: full distance
-# =========================
-def plot_distance():
-    cbf_df = load_df(CBF_FILE)
+# ============================================================
+# Common plotting helpers
+# ============================================================
 
-    time_col = get_time_col(cbf_df)
-    dist_col = get_front_distance_col(cbf_df)
-    safe_col = get_safe_distance_col(cbf_df)
-
-    plt.figure(figsize=(11, 5))
-
+def plot_distance_lines(df):
     plt.plot(
-        cbf_df[time_col],
-        cbf_df[dist_col],
+        df["time"],
+        df["distance_front"],
         linewidth=2,
         label="Current front distance",
     )
 
+    if "soft_barrier_distance" in df.columns:
+        plt.plot(
+            df["time"],
+            df["soft_barrier_distance"],
+            "--",
+            linewidth=2,
+            label="Soft comfort barrier",
+        )
+    elif "safe_distance" in df.columns:
+        plt.plot(
+            df["time"],
+            df["safe_distance"],
+            "--",
+            linewidth=2,
+            label="Soft comfort barrier",
+        )
+
+    if "hard_barrier_distance" in df.columns:
+        plt.plot(
+            df["time"],
+            df["hard_barrier_distance"],
+            ":",
+            linewidth=2,
+            label="Hard safety barrier",
+        )
+
+
+def plot_speed_lines(baseline_df, cbf_df):
+    speed_limit = 130.0 / 3.6
+
+    # 车2只在 cut-in 存在期间显示
+    v2_display = get_vehicle2_display_series(cbf_df)
+
+    # baseline ego
+    if len(baseline_df) > 0:
+        plt.plot(
+            baseline_df["time"],
+            baseline_df["v_ego"],
+            "--",
+            linewidth=2,
+            label="Ego speed PPO without CBF",
+        )
+
+    # cbf ego
     plt.plot(
-        cbf_df[time_col],
-        cbf_df[safe_col],
-        "--",
-        linewidth=2,
-        label="Safe distance",
-    )
-
-    add_event_lines(cbf_df)
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("Distance (m)")
-    plt.title("Distance to Current Front Vehicle")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("figure1_distance_to_current_front_vehicle.png", dpi=300)
-    plt.show()
-
-
-# =========================
-# Plot 2: speed
-# =========================
-def plot_speed():
-    baseline_df = load_df(BASELINE_FILE)
-    cbf_df = load_df(CBF_FILE)
-
-    time_col_base = get_time_col(baseline_df)
-    time_col_cbf = get_time_col(cbf_df)
-
-    v1_display, v2_display = get_vehicle_speed_display_series(cbf_df)
-
-    speed_limit = 130.0 / 3.6  # 36.11 m/s
-
-    plt.figure(figsize=(11, 5))
-
-    plt.plot(
-        baseline_df[time_col_base],
-        baseline_df["v_ego"],
-        "--",
-        linewidth=2,
-        label="Ego speed (Baseline)",
-    )
-
-    plt.plot(
-        cbf_df[time_col_cbf],
+        cbf_df["time"],
         cbf_df["v_ego"],
         linewidth=2,
-        label="Ego speed (CBF)",
+        label="Ego speed PPO + CBF",
     )
 
+    # 车1：全程显示
     plt.plot(
-        cbf_df[time_col_cbf],
-        v1_display,
+        cbf_df["time"],
+        cbf_df["v_front"],
         linewidth=2,
         label="Vehicle 1 speed",
     )
 
+    # 车2：仅 cut-in 存在期间显示
     plt.plot(
-        cbf_df[time_col_cbf],
+        cbf_df["time"],
         v2_display,
         linewidth=2,
         label="Vehicle 2 speed",
     )
 
+    # 限速线
     plt.axhline(
         speed_limit,
         linestyle=":",
@@ -253,198 +196,304 @@ def plot_speed():
         label="Speed limit 130 km/h",
     )
 
-    add_event_lines(cbf_df)
 
-    plt.xlabel("Time (s)")
-    plt.ylabel("Speed (m/s)")
-    plt.title("Vehicle Speeds")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("figure2_vehicle_speeds.png", dpi=300)
-    plt.show()
-
-
-# =========================
-# Plot 3: zoomed distance
-# =========================
-def plot_distance_zoom():
-    cbf_df = load_df(CBF_FILE)
-
-    time_col = get_time_col(cbf_df)
-    dist_col = get_front_distance_col(cbf_df)
-    safe_col = get_safe_distance_col(cbf_df)
-
-    cut_in_time, cut_out_time = get_event_times(cbf_df)
-
-    if cut_in_time is None:
-        print("No cut-in event found. Skip zoomed distance plot.")
-        return
-
-    start_time = max(0.0, cut_in_time - 20.0)
-
-    if cut_out_time is None:
-        end_time = cut_in_time + 80.0
-    else:
-        end_time = cut_out_time + 40.0
-
-    zoom_df = cbf_df[
-        (cbf_df[time_col] >= start_time)
-        & (cbf_df[time_col] <= end_time)
-    ].copy()
-
-    plt.figure(figsize=(11, 5))
-
-    plt.plot(
-        zoom_df[time_col],
-        zoom_df[dist_col],
-        linewidth=2,
-        label="Current front distance",
-    )
-
-    plt.plot(
-        zoom_df[time_col],
-        zoom_df[safe_col],
-        "--",
-        linewidth=2,
-        label="Safe distance",
-    )
-
-    add_event_lines(cbf_df)
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("Distance (m)")
-    plt.title("Zoomed Distance Response around Cut-in and Cut-out")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("figure3_zoomed_distance_response.png", dpi=300)
-    plt.show()
-
-
-# =========================
-# Optional Plot 4: CBF correction
-# =========================
-def plot_cbf_correction():
-    cbf_df = load_df(CBF_FILE)
-
-    time_col = get_time_col(cbf_df)
-    a_nom_col = get_nominal_acc_col(cbf_df)
-    a_ego_col = get_actual_acc_col(cbf_df)
-
-    correction = cbf_df[a_ego_col] - cbf_df[a_nom_col]
-
-    plt.figure(figsize=(11, 5))
-
-    plt.plot(
-        cbf_df[time_col],
-        correction,
-        linewidth=2,
-        label="CBF correction: a_ego - a_nom",
-    )
-
-    plt.axhline(
-        0.0,
-        linestyle="--",
-        linewidth=1.5,
-        label="No correction",
-    )
-
-    add_event_lines(cbf_df)
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("Acceleration correction (m/s²)")
-    plt.title("CBF Intervention on Nominal Acceleration")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("figure4_cbf_acceleration_correction.png", dpi=300)
-    plt.show()
-
-def plot_acceleration_zoom():
-    baseline_df = load_df(BASELINE_FILE)
-    cbf_df = load_df(CBF_FILE)
-
-    time_col_base = get_time_col(baseline_df)
-    time_col_cbf = get_time_col(cbf_df)
-
-    cut_in_time, cut_out_time = get_event_times(cbf_df)
-
-    if cut_in_time is None:
-        print("No cut-in event found. Skip zoomed acceleration plot.")
-        return
-
-    # Show from shortly before cut-in to shortly after cut-out
-    start_time = max(0.0, cut_in_time - 8.0)
-
-    if cut_out_time is None:
-        end_time = cut_in_time + 20.0
-        title = "Acceleration around Cut-in Entry"
-    else:
-        end_time = cut_out_time + 8.0
-        title = "Acceleration around Cut-in Entry and Exit"
-
-    baseline_zoom = baseline_df[
-        (baseline_df[time_col_base] >= start_time)
-        & (baseline_df[time_col_base] <= end_time)
-    ].copy()
-
-    cbf_zoom = cbf_df[
-        (cbf_df[time_col_cbf] >= start_time)
-        & (cbf_df[time_col_cbf] <= end_time)
-    ].copy()
-
-    plt.figure(figsize=(11, 5))
-
-    plt.plot(
-        baseline_zoom[time_col_base],
-        baseline_zoom["a_ego"],
-        "--",
-        linewidth=2,
-        label="Actual acceleration without CBF",
-    )
-
-    plt.plot(
-        cbf_zoom[time_col_cbf],
-        cbf_zoom["a_ego"],
-        linewidth=2,
-        label="Actual acceleration with CBF",
-    )
-
-    if cut_in_time is not None:
-        plt.axvline(
-            cut_in_time,
-            linestyle=":",
+def plot_acceleration_lines(baseline_df, cbf_df):
+    if len(baseline_df) > 0:
+        plt.plot(
+            baseline_df["time"],
+            baseline_df["a_ego"],
+            "--",
             linewidth=2,
-            label="Cut-in enters",
+            label="Actual acceleration PPO without CBF",
         )
 
-    if cut_out_time is not None:
-        plt.axvline(
-            cut_out_time,
-            linestyle="-.",
-            linewidth=2,
-            label="Cut-in leaves",
-        )
+    plt.plot(
+        cbf_df["time"],
+        cbf_df["a_ego"],
+        linewidth=2,
+        label="Actual acceleration PPO + CBF",
+    )
 
-    plt.xlabel("Time (s)")
-    plt.ylabel("Acceleration (m/s²)")
+
+def finish_plot(xlabel, ylabel, title, filename):
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     plt.title(title)
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("figure4_zoomed_actual_acceleration_baseline_vs_cbf.png", dpi=300)
+    plt.savefig(filename, dpi=300)
     plt.show()
 
-# =========================
-# Main
-# =========================
-if __name__ == "__main__":
-    plot_distance()
-    plot_speed()
-    plot_distance_zoom()
-    plot_acceleration_zoom()
 
-    # If you still want to check how much CBF really modifies action,
-    # uncomment the next line:
-    # plot_cbf_correction()
+# ============================================================
+# Full overview plots
+# ============================================================
+
+def plot_distance_overview():
+    cbf_df = load_df(CBF_FILE)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_distance_lines(cbf_df)
+    add_event_lines(cbf_df)
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Distance (m)",
+        title="Distance to Current Front Vehicle",
+        filename="figure1_distance_to_current_front_vehicle.png",
+    )
+
+
+def plot_speed_overview():
+    baseline_df = load_df(BASELINE_FILE)
+    cbf_df = load_df(CBF_FILE)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_speed_lines(baseline_df, cbf_df)
+    add_event_lines(cbf_df)
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Speed (m/s)",
+        title="Vehicle Speeds",
+        filename="figure2_vehicle_speeds.png",
+    )
+
+
+# ============================================================
+# Cut-in entry plots
+# ============================================================
+
+def plot_cut_in_entry_distance(before=12.0, after=25.0):
+    cbf_df = load_df(CBF_FILE)
+    cut_in_time, _ = get_event_times(cbf_df)
+
+    if cut_in_time is None:
+        print("No cut-in event found. Skip cut-in entry distance plot.")
+        return
+
+    entry_df = get_time_window(cbf_df, cut_in_time, before=before, after=after)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_distance_lines(entry_df)
+    add_single_event_line(cut_in_time, "Cut-in enters", ":")
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Distance (m)",
+        title="Cut-in Entry Distance Response",
+        filename="figure3_cut_in_entry_distance.png",
+    )
+
+
+def plot_cut_in_entry_speed(before=12.0, after=25.0):
+    baseline_df = load_df(BASELINE_FILE)
+    cbf_df = load_df(CBF_FILE)
+    cut_in_time, _ = get_event_times(cbf_df)
+
+    if cut_in_time is None:
+        print("No cut-in event found. Skip cut-in entry speed plot.")
+        return
+
+    entry_df = get_time_window(cbf_df, cut_in_time, before=before, after=after)
+
+    start_time = entry_df["time"].min()
+    end_time = entry_df["time"].max()
+    baseline_entry_df = get_time_window_from_other_df(baseline_df, start_time, end_time)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_speed_lines(baseline_entry_df, entry_df)
+    add_single_event_line(cut_in_time, "Cut-in enters", ":")
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Speed (m/s)",
+        title="Cut-in Entry Speed Response",
+        filename="figure4_cut_in_entry_speed.png",
+    )
+
+
+def plot_cut_in_entry_acceleration(before=8.0, after=18.0):
+    baseline_df = load_df(BASELINE_FILE)
+    cbf_df = load_df(CBF_FILE)
+    cut_in_time, _ = get_event_times(cbf_df)
+
+    if cut_in_time is None:
+        print("No cut-in event found. Skip cut-in entry acceleration plot.")
+        return
+
+    entry_df = get_time_window(cbf_df, cut_in_time, before=before, after=after)
+
+    start_time = entry_df["time"].min()
+    end_time = entry_df["time"].max()
+    baseline_entry_df = get_time_window_from_other_df(baseline_df, start_time, end_time)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_acceleration_lines(baseline_entry_df, entry_df)
+    add_single_event_line(cut_in_time, "Cut-in enters", ":")
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Acceleration (m/s²)",
+        title="Cut-in Entry Acceleration Response",
+        filename="figure5_cut_in_entry_acceleration.png",
+    )
+
+
+# ============================================================
+# Cut-out leave plots
+# ============================================================
+
+def plot_cut_out_leave_distance(before=12.0, after=30.0, distance_ylim=None):
+    cbf_df = load_df(CBF_FILE)
+    _, cut_out_time = get_event_times(cbf_df)
+
+    if cut_out_time is None:
+        print("No cut-out event found. Skip cut-out leave distance plot.")
+        return
+
+    leave_df = get_time_window(cbf_df, cut_out_time, before=before, after=after)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_distance_lines(leave_df)
+    add_single_event_line(cut_out_time, "Cut-in leaves", "-.")
+
+    if distance_ylim is not None:
+        plt.ylim(distance_ylim)
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Distance (m)",
+        title="Cut-out Recovery Distance Response",
+        filename="figure6_cut_out_recovery_distance.png",
+    )
+
+
+def plot_cut_out_leave_speed(before=12.0, after=30.0):
+    baseline_df = load_df(BASELINE_FILE)
+    cbf_df = load_df(CBF_FILE)
+    _, cut_out_time = get_event_times(cbf_df)
+
+    if cut_out_time is None:
+        print("No cut-out event found. Skip cut-out leave speed plot.")
+        return
+
+    leave_df = get_time_window(cbf_df, cut_out_time, before=before, after=after)
+
+    start_time = leave_df["time"].min()
+    end_time = leave_df["time"].max()
+    baseline_leave_df = get_time_window_from_other_df(baseline_df, start_time, end_time)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_speed_lines(baseline_leave_df, leave_df)
+    add_single_event_line(cut_out_time, "Cut-in leaves", "-.")
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Speed (m/s)",
+        title="Cut-out Recovery Speed Response",
+        filename="figure7_cut_out_recovery_speed.png",
+    )
+
+
+def plot_cut_out_leave_acceleration(before=8.0, after=18.0):
+    baseline_df = load_df(BASELINE_FILE)
+    cbf_df = load_df(CBF_FILE)
+    _, cut_out_time = get_event_times(cbf_df)
+
+    if cut_out_time is None:
+        print("No cut-out event found. Skip cut-out leave acceleration plot.")
+        return
+
+    leave_df = get_time_window(cbf_df, cut_out_time, before=before, after=after)
+
+    start_time = leave_df["time"].min()
+    end_time = leave_df["time"].max()
+    baseline_leave_df = get_time_window_from_other_df(baseline_df, start_time, end_time)
+
+    plt.figure(figsize=(11, 5))
+
+    plot_acceleration_lines(baseline_leave_df, leave_df)
+    add_single_event_line(cut_out_time, "Cut-in leaves", "-.")
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Acceleration (m/s²)",
+        title="Cut-out Recovery Acceleration Response",
+        filename="figure8_cut_out_recovery_acceleration.png",
+    )
+
+
+# ============================================================
+# Optional: CBF intervention plot
+# ============================================================
+
+def plot_cbf_intervention():
+    cbf_df = load_df(CBF_FILE)
+
+    if "a_nom" not in cbf_df.columns or "a_ego" not in cbf_df.columns:
+        print("No a_nom/a_ego columns found. Skip CBF intervention plot.")
+        return
+
+    correction = (cbf_df["a_ego"] - cbf_df["a_nom"]).abs()
+
+    plt.figure(figsize=(11, 5))
+
+    plt.plot(
+        cbf_df["time"],
+        cbf_df["a_nom"],
+        "--",
+        linewidth=2,
+        label="PPO nominal acceleration a_nom",
+    )
+
+    plt.plot(
+        cbf_df["time"],
+        cbf_df["a_ego"],
+        linewidth=2,
+        label="CBF-filtered acceleration a_ego",
+    )
+
+    plt.plot(
+        cbf_df["time"],
+        correction,
+        ":",
+        linewidth=2,
+        label="|CBF correction|",
+    )
+
+    add_event_lines(cbf_df)
+
+    finish_plot(
+        xlabel="Time (s)",
+        ylabel="Acceleration / correction (m/s²)",
+        title="CBF Intervention: PPO Nominal vs Filtered Acceleration",
+        filename="figure9_cbf_intervention.png",
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+if __name__ == "__main__":
+    plot_distance_overview()
+    plot_speed_overview()
+
+    plot_cut_in_entry_distance()
+    plot_cut_in_entry_speed()
+    plot_cut_in_entry_acceleration()
+
+    plot_cut_out_leave_distance()
+    plot_cut_out_leave_speed()
+    plot_cut_out_leave_acceleration()
+
+    plot_cbf_intervention()
