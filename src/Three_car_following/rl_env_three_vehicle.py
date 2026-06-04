@@ -60,13 +60,6 @@ class ThreeVehicleRLEnv(gym.Env):
             cut_in_happened,
             remaining_distance
         ]
-
-        PPO observation includes extra learning-friendly features:
-            - normalized speeds
-            - gap size
-            - gap error
-            - closing speed
-            - remaining distance
         """
 
         v_ego = state[0]
@@ -78,29 +71,38 @@ class ThreeVehicleRLEnv(gym.Env):
 
         closing_speed = v_ego - v_front
 
-        # Same soft barrier logic as env
         soft_distance = 5.0 + 0.6 * v_ego + 1.0 * max(0.0, closing_speed)
+        hard_distance = 4.0 + 0.35 * v_ego + 0.80 * max(0.0, closing_speed)
+
         desired_distance = soft_distance + 3.0
         gap_error = distance_front - desired_distance
+
+        after_cut_out = 1.0 if (
+            self.env.cut_in_happened and not self.env.cut_in_active
+        ) else 0.0
+
+        cut_in_active = 1.0 if self.env.cut_in_active else 0.0
 
         normalized = np.array(
             [
                 v_ego / self.speed_limit,
                 v_front / self.speed_limit,
 
-                # do not clip too aggressively
-                np.clip(distance_front / 500.0, 0.0, 5.0),
+                np.clip(distance_front / 300.0, 0.0, 5.0),
+                np.clip(gap_error / 150.0, -5.0, 5.0),
 
                 relative_velocity / self.speed_limit,
                 closing_speed / self.speed_limit,
 
-                np.clip(gap_error / 200.0, -5.0, 5.0),
+                soft_distance / 100.0,
+                hard_distance / 100.0,
 
-                cut_in_happened,
+                cut_in_active,
+                after_cut_out,
+
                 remaining_distance / self.target_distance,
 
-                # explicit too-far indicator
-                1.0 if gap_error > 30.0 else 0.0,
+                self.env.prev_a_ego / 4.0,
             ],
             dtype=np.float32,
         )

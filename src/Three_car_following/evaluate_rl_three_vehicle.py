@@ -6,12 +6,7 @@ from env_three_vehicle import ThreeVehicleFollowingEnv
 from controllers_three_vehicle import cbf_three_vehicle_filter
 
 
-def normalize_state(state, target_distance=4000.0):
-    """
-    PPO was trained on normalized observations.
-    Evaluation must use the same normalized observation.
-    """
-
+def normalize_state(state, env, target_distance=4000.0):
     speed_limit = 130.0 / 3.6
 
     v_ego = state[0]
@@ -24,25 +19,37 @@ def normalize_state(state, target_distance=4000.0):
     closing_speed = v_ego - v_front
 
     soft_distance = 5.0 + 0.6 * v_ego + 1.0 * max(0.0, closing_speed)
+    hard_distance = 4.0 + 0.35 * v_ego + 0.80 * max(0.0, closing_speed)
+
     desired_distance = soft_distance + 3.0
     gap_error = distance_front - desired_distance
+
+    after_cut_out = 1.0 if (
+        env.cut_in_happened and not env.cut_in_active
+    ) else 0.0
+
+    cut_in_active = 1.0 if env.cut_in_active else 0.0
 
     return np.array(
         [
             v_ego / speed_limit,
             v_front / speed_limit,
 
-            np.clip(distance_front / 500.0, 0.0, 5.0),
+            np.clip(distance_front / 300.0, 0.0, 5.0),
+            np.clip(gap_error / 150.0, -5.0, 5.0),
 
             relative_velocity / speed_limit,
             closing_speed / speed_limit,
 
-            np.clip(gap_error / 200.0, -5.0, 5.0),
+            soft_distance / 100.0,
+            hard_distance / 100.0,
 
-            cut_in_happened,
+            cut_in_active,
+            after_cut_out,
+
             remaining_distance / target_distance,
 
-            1.0 if gap_error > 30.0 else 0.0,
+            env.prev_a_ego / 4.0,
         ],
         dtype=np.float32,
     )
@@ -81,7 +88,7 @@ def run_rl_episode(
     done = False
 
     while not done:
-        obs = normalize_state(state, target_distance=target_distance)
+        obs = normalize_state(state, env, target_distance=target_distance)
 
         action, _ = model.predict(obs, deterministic=True)
 
@@ -89,14 +96,18 @@ def run_rl_episode(
         a_nom = map_action_to_acceleration(action)
 
         if use_cbf:
-            a_ego = cbf_three_vehicle_filter(a_nom, state, dt=env.dt)
+            a_cbf_cmd = cbf_three_vehicle_filter(a_nom, state, dt=env.dt)
         else:
-            a_ego = a_nom
+            a_cbf_cmd = a_nom
 
-        next_state, reward, done, info = env.step(a_ego)
+        next_state, reward, done, info = env.step(a_cbf_cmd)
 
         info["a_nom"] = a_nom
-        info["a_ego"] = a_ego
+        info["a_ppo_before_cbf"] = a_nom
+        info["a_cbf_cmd"] = a_cbf_cmd
+        info["cbf_correction"] = a_cbf_cmd - a_nom
+        info["abs_cbf_correction"] = abs(a_cbf_cmd - a_nom)
+
         info["use_cbf"] = use_cbf
         info["method"] = "PPO + CBF" if use_cbf else "PPO without CBF"
         info["scenario"] = scenario
@@ -109,7 +120,10 @@ def run_rl_episode(
 
 
 def summarize_episode(df):
-    correction = (df["a_ego"] - df["a_nom"]).abs()
+    if "a_cbf_cmd" in df.columns:
+        correction = (df["a_cbf_cmd"] - df["a_nom"]).abs()
+    else:
+        correction = (df["a_ego"] - df["a_nom"]).abs()
 
     return {
         "reached_target": df["reached_target"].any(),

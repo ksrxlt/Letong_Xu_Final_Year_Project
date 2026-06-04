@@ -1,7 +1,7 @@
 import pandas as pd
 
-from env import CarFollowingEnv
-from controllers import rule_based_controller, cbf_safety_filter
+from src.car_following.env import CarFollowingEnv
+from src.car_following.controllers import rule_based_controller, cbf_safety_filter
 
 
 def run_episode(use_cbf=False, seed=0):

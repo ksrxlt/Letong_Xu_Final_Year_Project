@@ -1,7 +1,7 @@
 import pandas as pd
 
-from multi_lane_env import MultiLaneCarFollowingEnv
-from lane_change_controller import (
+from src.change_lane.multi_lane_env import MultiLaneCarFollowingEnv
+from src.change_lane.lane_change_controller import (
     rule_based_acceleration_controller,
     lane_change_decision,
     lane_change_safety_filter,

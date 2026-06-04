@@ -1,6 +1,6 @@
 import pandas as pd
 
-from run_simulation import run_episode, summarize_episode
+from src.car_following.run_simulation import run_episode, summarize_episode
 
 
 def evaluate_method(use_cbf=False, num_episodes=20):

@@ -46,9 +46,25 @@ class ThreeVehicleFollowingEnv:
         self.max_steps = max_steps
         self.target_distance = target_distance
         self.scenario = scenario
+        self.max_accel_change = 0.25
 
         # 130 km/h = 36.11 m/s
         self.speed_limit = 130.0 / 3.6
+
+        # ------------------------------------------------------------
+        # Acceleration smoothing / actuator dynamics
+        # ------------------------------------------------------------
+        # This prevents unrealistic instant acceleration jumps.
+        # The policy can still be aggressive, but the executed acceleration
+        # changes smoothly.
+        self.accel_smoothing_alpha = 0.25
+
+        # Normal maximum acceleration change per simulation step.
+        # dt = 0.1 s, so 0.15 means max jerk around 1.5 m/s^3.
+        self.max_accel_change_normal = 0.15
+
+        # Emergency braking is allowed to change faster for safety.
+        self.max_accel_change_emergency = 0.60
 
         # Cut-in is disabled during the initial warm-up phase.
         self.cut_in_allowed_after_distance = 1000.0
@@ -80,11 +96,13 @@ class ThreeVehicleFollowingEnv:
 
         self.t = 0
         self.done = False
+        self.prev_a_ego = 0.0
 
         # Ego vehicle
         self.x_ego = 0.0
         self.v_ego = np.random.uniform(18.0, 22.0)
         self.lane_ego = 0
+        self.prev_v_front_eff = 0.0
 
         # Vehicle 1: original front vehicle
         self.x_front = np.random.uniform(25.0, 35.0)
@@ -465,8 +483,59 @@ class ThreeVehicleFollowingEnv:
     # ============================================================
 
     def step(self, a_ego):
-        a_ego = float(np.clip(a_ego, -4.0, 2.0))
+        
+        # Store previous executed acceleration.
+        # This is used for smoothness reward and actuator smoothing.
+        prev_a_ego_before_step = self.prev_a_ego
 
+        # Raw command from PPO or PPO+CBF
+        a_cmd = float(np.clip(a_ego, -4.0, 2.0))
+
+        # ------------------------------------------------------------
+        # Acceleration smoothing / actuator model
+        # ------------------------------------------------------------
+        # First apply a low-pass filter to avoid sudden command jumps.
+        a_target = (
+            prev_a_ego_before_step
+            + self.accel_smoothing_alpha * (a_cmd - prev_a_ego_before_step)
+        )
+
+        # Before deciding the allowed acceleration change, check whether
+        # the ego vehicle is close to the safety boundary.
+        front_type_now, x_front_eff_now, v_front_eff_now = self.get_effective_front_vehicle()
+        distance_front_now = x_front_eff_now - self.x_ego
+
+        soft_now = self.soft_barrier_distance(v_front_eff_now)
+        hard_now = self.hard_barrier_distance(v_front_eff_now)
+        closing_speed_now = self.v_ego - v_front_eff_now
+
+        # Emergency condition:
+        # If ego is close to the hard barrier or closing in too fast,
+        # allow faster braking. This keeps safety while preserving smoothness
+        # in normal driving.
+        emergency_brake_needed = (
+            distance_front_now < hard_now + 3.0
+            or (
+                distance_front_now < soft_now + 5.0
+                and closing_speed_now > 3.0
+            )
+        )
+
+        if emergency_brake_needed and a_target < prev_a_ego_before_step:
+            max_delta_a = self.max_accel_change_emergency
+        else:
+            max_delta_a = self.max_accel_change_normal
+
+        delta_a = np.clip(
+            a_target - prev_a_ego_before_step,
+            -max_delta_a,
+            max_delta_a,
+        )
+
+        # This is the actual acceleration applied to the vehicle.
+        a_ego = prev_a_ego_before_step + delta_a
+        a_ego = float(np.clip(a_ego, -4.0, 2.0))
+        
         # Cut-in can happen before motion update.
         cut_in_this_step = self.maybe_cut_in()
 
@@ -512,76 +581,307 @@ class ThreeVehicleFollowingEnv:
 
         reached_target = self.x_ego >= self.target_distance
 
+        # ------------------------------------------------------------
+        # Front vehicle acceleration estimation
+        # ------------------------------------------------------------
+        prev_v_front_eff_before_step = self.prev_v_front_eff
+
+        front_accel_est = (v_front_eff - prev_v_front_eff_before_step) / self.dt
+        front_accel_est = float(np.clip(front_accel_est, -4.0, 3.0))
+
         # ============================================================
-        # Stable PPO reward: learn basic acceleration and braking
+        # PPO reward: aggressive but stable soft-barrier tracking
         # ============================================================
 
         reward = 0.0
 
-        desired_distance = soft_distance + 3.0
-        distance_error = distance_front - desired_distance
-        gap_excess = max(0.0, distance_error)
-        too_close = max(0.0, -distance_error)
+        # ------------------------------------------------------------
+        # 1. Define tracking target
+        # ------------------------------------------------------------
+        actual_gap = distance_front
 
+        # Target slightly above soft barrier.
+        # This prevents PPO from learning to ride below soft and close to hard.
+        target_gap = soft_distance + 1.5
+
+        gap_error_to_target = actual_gap - target_gap
+
+        gap_excess = max(0.0, gap_error_to_target)
+        too_close_to_target = max(0.0, -gap_error_to_target)
+
+        soft_violation = max(0.0, soft_distance - actual_gap)
+        hard_violation = max(0.0, hard_distance - actual_gap)
+
+        # Positive closing_speed means ego is catching the front vehicle.
         closing_speed = self.v_ego - v_front_eff
 
-        # 1. Progress reward
-        reward += 0.1 * self.v_ego
+        # Keep this only for logging or future use.
+        after_cut_out = self.cut_in_happened and not self.cut_in_active
 
-        # 2. Distance shaping, bounded
-        # Too far: penalise, but bounded.
-        reward -= 4.0 * np.tanh(gap_excess / 100.0)
+        # ------------------------------------------------------------
+        # 2. Progress reward
+        # ------------------------------------------------------------
+        # Keep this moderate. Too large would encourage riding close
+        # to the hard barrier just to maintain speed.
+        reward += 0.05 * self.v_ego
 
-        # Too close: stronger penalty.
-        reward -= 6.0 * np.tanh(too_close / 20.0)
+        # ------------------------------------------------------------
+        # 3. Piecewise catch-up mode based on excess gap
+        # ------------------------------------------------------------
+        # gap_excess <= 10m:
+        #     gentle soft-barrier tracking
+        #
+        # 10m < gap_excess <= 20m:
+        #     mild catch-up
+        #
+        # gap_excess > 20m:
+        #     strong catch-up
 
-        # 3. Action guidance when too far
-        # If gap is large, encourage positive acceleration.
+        if gap_excess <= 10.0:
+            catchup_level = 0.0
+        elif gap_excess <= 20.0:
+            catchup_level = 1.0
+        else:
+            catchup_level = 2.0
+
+        catchup_weight = np.clip(
+            (gap_excess - 10.0) / 20.0,
+            0.0,
+            1.0,
+        )
+
+        strong_catchup_weight = np.clip(
+            (gap_excess - 20.0) / 20.0,
+            0.0,
+            1.0,
+        )
+
+        # ------------------------------------------------------------
+        # 4. Desired closing speed
+        # ------------------------------------------------------------
+        # Near target: gentle.
+        desired_closing_speed_normal = np.clip(
+            0.020 * gap_error_to_target,
+            -1.5,
+            2.5,
+        )
+
+        # Medium catch-up.
+        desired_closing_speed_catchup = np.clip(
+            0.070 * gap_error_to_target,
+            -3.0,
+            10.0,
+        )
+
+        # Strong catch-up, but not too extreme.
+        desired_closing_speed_strong = np.clip(
+            0.090 * gap_error_to_target,
+            -3.0,
+            13.0,
+        )
+
+        desired_closing_speed = (
+            (1.0 - catchup_weight) * desired_closing_speed_normal
+            + catchup_weight * desired_closing_speed_catchup
+        )
+
+        desired_closing_speed = (
+            (1.0 - strong_catchup_weight) * desired_closing_speed
+            + strong_catchup_weight * desired_closing_speed_strong
+        )
+
+        # If ego is already closer than target, desired closing speed
+        # must be non-positive.
+        if gap_error_to_target < 0.0:
+            desired_closing_speed = np.clip(
+                0.18 * gap_error_to_target,
+                -5.0,
+                0.0,
+            )
+
+        closing_speed_error = closing_speed - desired_closing_speed
+
+        # ------------------------------------------------------------
+        # Overshoot prevention near the soft barrier
+        # ------------------------------------------------------------
+        # If ego is close to the target/soft barrier but is still closing too fast,
+        # penalise it before it reaches the hard barrier.
+        approach_zone = max(soft_distance + 10.0, target_gap + 8.0)
+
+        if actual_gap < approach_zone and closing_speed > 0.0:
+            excess_closing_near_soft = max(0.0, closing_speed - 0.5)
+            reward -= 6.0 * np.tanh(excess_closing_near_soft / 3.0)
+
+        # ------------------------------------------------------------
+        # 5. Gap tracking reward
+        # ------------------------------------------------------------
+        normalized_gap_error = gap_error_to_target / max(target_gap, 1.0)
+
+        # Main target tracking penalty.
+        reward -= 4.5 * np.tanh(abs(normalized_gap_error))
+
+        # Penalise being farther than target.
+        reward -= 3.5 * np.tanh(gap_excess / 60.0)
+
+        # Extra piecewise large-gap penalties.
+        if gap_excess > 10.0:
+            reward -= 2.0 * np.tanh((gap_excess - 10.0) / 25.0)
+
         if gap_excess > 20.0:
-            reward += 2.0 * np.tanh(a_ego / 1.0)
+            reward -= 3.0 * np.tanh((gap_excess - 20.0) / 35.0)
 
-            if a_ego < 0.0:
-                reward -= 2.0 * abs(a_ego)
+        # Penalise being closer than target.
+        # This is stronger than far-gap penalty because riding below target
+        # tends to push the car towards the hard barrier and trigger CBF.
+        reward -= 10.0 * np.tanh(too_close_to_target / 8.0)
 
-        # 4. Action guidance when too close
-        # If too close, encourage braking.
-        if distance_front < soft_distance:
-            reward += 2.0 * np.tanh((-a_ego) / 2.0)
+        # Soft comfort barrier violation penalty.
+        # This is the key change:
+        #   soft barrier is not a hard constraint,
+        #   but staying below it should be clearly unattractive.
+        reward -= 7.0 * np.tanh(soft_violation / 4.0)
 
-            if a_ego > 0.0:
-                reward -= 3.0 * a_ego
+        # Additional penalty if it is below soft and still closing in.
+        # This specifically prevents "pushing through soft towards hard".
+        if soft_violation > 0.0 and closing_speed > 0.0:
+            reward -= 5.0 * np.tanh(closing_speed / 3.0)
 
-        # 5. Closing speed guidance
-        # If too far, ego should be faster than front vehicle.
+        # Encourage correct relative speed.
+        reward -= 2.5 * ((closing_speed_error / 6.0) ** 2)
+
+        # ------------------------------------------------------------
+        # 6. Catch-up speed reward
+        # ------------------------------------------------------------
+        speed_limit = self.speed_limit
+
+        catchup_speed_target = min(
+            speed_limit,
+            v_front_eff + desired_closing_speed,
+        )
+
+        speed_error_catchup = self.v_ego - catchup_speed_target
+
+        # Only active when ego is clearly farther than target.
+        reward -= catchup_weight * 3.0 * ((speed_error_catchup / 6.0) ** 2)
+
+        # ------------------------------------------------------------
+        # 7. Near-target bonus
+        # ------------------------------------------------------------
+        gap_abs_error = abs(gap_error_to_target)
+
+        # Bonus around target_gap = soft_distance + 1.5.
+        # This encourages tracking near soft, not hard.
+        if gap_abs_error < 3.0:
+            reward += 2.0
+
+        if gap_abs_error < 1.5:
+            reward += 3.0
+
+        # Extra bonus for being safely above soft barrier but close to it.
+        # This makes the preferred region explicit:
+        #   soft_distance <= actual_gap <= soft_distance + 4m
+        if soft_violation == 0.0 and actual_gap < soft_distance + 4.0:
+            reward += 2.0
+
+        # ------------------------------------------------------------
+        # 8. Target acceleration reference
+        # ------------------------------------------------------------
+        a_ref = 0.45 * (desired_closing_speed - closing_speed)
+        # ------------------------------------------------------------
+        # Front vehicle acceleration feedforward
+        # ------------------------------------------------------------
+        # If the current front vehicle accelerates, ego should respond earlier
+        # instead of waiting until the gap has already become large.
+        if front_accel_est > 0.0 and gap_excess < 25.0:
+            a_ref += 0.25 * front_accel_est
+
+        # Direct gap feedback.
+        # Within 10m above target: gentle.
+        # Outside 10m: more aggressive.
+        if gap_excess <= 10.0:
+            a_ref += 0.0045 * gap_error_to_target
+        else:
+            a_ref += 0.015 * gap_error_to_target
+
+        # Piecewise large-gap catch-up boost.
+        if gap_excess > 10.0:
+            a_ref += 0.10
+
         if gap_excess > 20.0:
-            reward += 2.0 * np.tanh(closing_speed / 5.0)
+            a_ref += 0.25
 
-        # If too close and ego is still faster, penalise.
-        if distance_front < soft_distance and closing_speed > 0.0:
-            reward -= 4.0 * np.tanh(closing_speed / 5.0)
+        a_ref += catchup_weight * 0.25
+        a_ref += strong_catchup_weight * 0.35
 
-        # 6. Hard barrier penalty
-        if distance_front < hard_distance:
-            reward -= 30.0 * np.tanh((hard_distance - distance_front) / 5.0)
+        # ------------------------------------------------------------
+        # 8a. Soft-barrier approach control
+        # ------------------------------------------------------------
+        # Near soft barrier, reduce acceleration earlier.
+        # This prevents ego from overshooting soft and riding near hard.
+        if actual_gap < soft_distance + 6.0 and closing_speed > 0.0:
+            a_ref -= 0.9 * closing_speed
 
-        # 7. Collision penalty
+        # If below soft barrier, do NOT apply a hard sudden braking bias.
+        # Instead, softly bias towards deceleration.
+        # This avoids the instability caused by:
+        #     a_ref -= 0.6 + 0.25 * soft_violation
+        if soft_violation > 0.0:
+            a_ref -= 0.25 * soft_violation
+
+            # If still closing while below soft, brake more clearly.
+            if closing_speed > 0.0:
+                a_ref -= 0.6 * closing_speed
+
+        # Hard barrier is the real safety boundary.
+        # Only here do we strongly prefer braking.
+        if hard_violation > 0.0:
+            a_ref = min(a_ref, -3.0)
+
+        a_ref = float(np.clip(a_ref, -4.0, 2.0))
+
+        # Reward action being close to reference acceleration.
+        reward -= 1.5 * ((a_ego - a_ref) / 2.0) ** 2
+
+        # ------------------------------------------------------------
+        # 9. Hard safety barrier penalty
+        # ------------------------------------------------------------
+        if hard_violation > 0.0:
+            reward -= 45.0 * np.tanh(hard_violation / 5.0)
+
+        # ------------------------------------------------------------
+        # 10. Collision and target
+        # ------------------------------------------------------------
         if collision:
             reward -= 100.0
 
-        # 8. Target reward
         if reached_target:
             reward += 100.0
 
-        # 9. Low speed penalty
-        if self.v_ego < 5.0 and not reached_target:
-            reward -= 5.0
-
-        # 10. Speed limit penalty
+        # ------------------------------------------------------------
+        # 11. Speed limit penalty
+        # ------------------------------------------------------------
         if self.v_ego > self.speed_limit:
             reward -= 20.0 * (self.v_ego - self.speed_limit)
 
-        # 11. Small action penalty
-        reward -= 0.001 * (a_ego ** 2)
+        # ------------------------------------------------------------
+        # 12. Low speed penalty
+        # ------------------------------------------------------------
+        if self.v_ego < 5.0 and not reached_target:
+            reward -= 5.0
+
+        # ------------------------------------------------------------
+        # 13. Smoothness penalty
+        # ------------------------------------------------------------
+        delta_a = a_ego - prev_a_ego_before_step
+        jerk = delta_a / self.dt
+
+        reward -= 2.0 * ((delta_a / 1.0) ** 2)
+
+        # Mild acceleration magnitude penalty.
+        reward -= 0.02 * ((a_ego / 2.0) ** 2)
+
+        # Bounded jerk penalty.
+        reward -= 0.08 * np.tanh(abs(jerk) / 8.0)
 
         self.done = collision or reached_target or self.t >= self.max_steps
 
@@ -641,11 +941,26 @@ class ThreeVehicleFollowingEnv:
             "safety_violation": safety_violation,
             "reached_target": reached_target,
 
+            "a_cmd": a_cmd,
             "a_ego": a_ego,
+            "prev_a_ego": prev_a_ego_before_step,
+            "delta_a_ego": a_ego - prev_a_ego_before_step,
             "a_front": a_front,
             "a_cut_in": a_cut_in,
+
+            "v_front_eff": v_front_eff,
+            "prev_v_front_eff": prev_v_front_eff_before_step,
+            "front_accel_est": front_accel_est,
+            "gap_error_to_target": gap_error_to_target,
+            "gap_excess": gap_excess,
+            "soft_violation": soft_violation,
+            "hard_violation": hard_violation,
+            "desired_closing_speed": desired_closing_speed,
+            
 
             "reward": reward,
         }
 
+        self.prev_a_ego = a_ego
+        self.prev_v_front_eff = v_front_eff
         return next_state, reward, self.done, info

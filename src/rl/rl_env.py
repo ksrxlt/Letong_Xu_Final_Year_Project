@@ -2,7 +2,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from env import CarFollowingEnv
+from src.car_following.env import CarFollowingEnv
 
 
 class CarFollowingGymEnv(gym.Env):

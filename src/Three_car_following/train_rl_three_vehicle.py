@@ -23,6 +23,9 @@ def main():
         gae_lambda=0.95,
         clip_range=0.2,
         ent_coef=0.005,
+        policy_kwargs=dict(
+            net_arch=dict(pi=[128, 128], vf=[128, 128])
+        ),
     )
 
     model.learn(total_timesteps=300_000)

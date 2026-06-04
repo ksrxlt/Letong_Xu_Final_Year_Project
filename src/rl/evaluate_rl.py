@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 
-from env import CarFollowingEnv
-from controllers import cbf_safety_filter
+from src.car_following.env import CarFollowingEnv
+from src.car_following.controllers import cbf_safety_filter
 
 
 def action_to_acceleration(action):
