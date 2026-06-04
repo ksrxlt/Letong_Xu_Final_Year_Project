@@ -143,18 +143,18 @@ class ThreeVehicleFollowingEnv:
         """
         Hard short-horizon safety barrier.
 
-        This is the non-negotiable lower safety boundary used by the CBF.
-        It is deliberately less conservative than a full stopping-distance
-        barrier, so the PPO controller can still perform aggressive catch-up.
+        This is the minimum safety boundary used by the CBF.
+        It is stricter than the previous version but still less conservative
+        than the soft comfort barrier.
         """
 
-        min_gap = 3.0
+        min_gap = 4.0
         closing_speed = max(0.0, self.v_ego - v_front_eff)
 
         hard_distance = (
             min_gap
-            + 0.2 * self.v_ego
-            + 0.4 * closing_speed
+            + 0.35 * self.v_ego
+            + 0.80 * closing_speed
         )
 
         return hard_distance
