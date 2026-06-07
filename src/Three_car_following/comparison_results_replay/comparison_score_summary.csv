@@ -1,0 +1,6 @@
+category,ppo_cbf_score,cdfs_score,winner
+Comfort,4.0,0.0,PPO + CBF
+Distance keeping,0.0,3.0,CDFS
+Efficiency,1.0,2.0,CDFS
+Safety,1.5,1.5,Tie
+Overall,6.5,6.5,Tie

@@ -901,30 +901,48 @@ class ThreeVehicleFollowingEnv:
             "step": self.t,
             "time": self.t * self.dt,
 
+            # Ego vehicle
             "x_ego": self.x_ego,
             "v_ego": self.v_ego,
 
+            # Vehicle 1
             "x_front": self.x_front,
             "v_front": self.v_front,
             "lane_front": self.lane_front,
 
+            # Vehicle 2
             "x_cut_in": self.x_cut_in,
             "v_cut_in": self.v_cut_in,
             "lane_cut_in": self.lane_cut_in,
 
+            # Current effective front vehicle
             "front_type": front_type,
             "front_id": front_id,
             "distance_front": distance_front,
+            "v_front_eff": v_front_eff,
             "gap_to_v1": gap_to_v1,
             "gap_to_v2": gap_to_v2,
 
-            # For old and new plots
+            # Barrier distances
             "safe_distance": safe_distance,
+            "soft_distance": soft_distance,
+            "hard_distance": hard_distance,
             "soft_barrier_distance": soft_distance,
             "hard_barrier_distance": hard_distance,
 
-            "too_far": too_far,
+            # Reward debug
+            "target_gap": target_gap,
+            "gap_error_to_target": gap_error_to_target,
+            "gap_excess": gap_excess,
+            "soft_violation": soft_violation,
+            "hard_violation": hard_violation,
+            "front_accel_est": front_accel_est,
+            "desired_closing_speed": desired_closing_speed,
+            "closing_speed": closing_speed,
+            "a_ref": a_ref,
 
+            # Scenario state
+            "too_far": too_far,
             "cut_in_happened": self.cut_in_happened,
             "cut_in_active": self.cut_in_active,
             "cut_in_this_step": cut_in_this_step,
@@ -937,10 +955,12 @@ class ThreeVehicleFollowingEnv:
             "cut_in_event_type": self.cut_in_event_type,
             "cut_in_event_timer": self.cut_in_event_timer,
 
+            # Safety and termination
             "collision": collision,
             "safety_violation": safety_violation,
             "reached_target": reached_target,
 
+            # Control signals known by env
             "a_cmd": a_cmd,
             "a_ego": a_ego,
             "prev_a_ego": prev_a_ego_before_step,
@@ -948,19 +968,13 @@ class ThreeVehicleFollowingEnv:
             "a_front": a_front,
             "a_cut_in": a_cut_in,
 
-            "v_front_eff": v_front_eff,
-            "prev_v_front_eff": prev_v_front_eff_before_step,
-            "front_accel_est": front_accel_est,
-            "gap_error_to_target": gap_error_to_target,
-            "gap_excess": gap_excess,
-            "soft_violation": soft_violation,
-            "hard_violation": hard_violation,
-            "desired_closing_speed": desired_closing_speed,
-            
-
+            # Reward
             "reward": reward,
         }
 
         self.prev_a_ego = a_ego
         self.prev_v_front_eff = v_front_eff
+        
+        self.distance_front = distance_front
+        self.v_front_eff = v_front_eff
         return next_state, reward, self.done, info
